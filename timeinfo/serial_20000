@@ -1,0 +1,50 @@
+./timer.sh: line 5: 23691 Segmentation fault      ./optimized_cudadist $2
+
+real	4m1.083s
+user	2m45.009s
+sys	0m11.617s
+./timer.sh: line 5: 23981 Segmentation fault      ./optimized_cudadist $2
+
+real	4m19.897s
+user	2m47.353s
+sys	0m12.061s
+./timer.sh: line 5: 24039 Segmentation fault      ./optimized_cudadist $2
+
+real	4m5.528s
+user	2m40.631s
+sys	0m11.812s
+./timer.sh: line 5: 24069 Segmentation fault      ./optimized_cudadist $2
+
+real	4m11.289s
+user	2m45.349s
+sys	0m11.820s
+./timer.sh: line 5: 24139 Segmentation fault      ./optimized_cudadist $2
+
+real	3m58.636s
+user	2m45.851s
+sys	0m11.385s
+./timer.sh: line 5: 24163 Segmentation fault      ./optimized_cudadist $2
+
+real	4m2.125s
+user	2m45.709s
+sys	0m11.639s
+./timer.sh: line 5: 24234 Segmentation fault      ./optimized_cudadist $2
+
+real	3m49.754s
+user	2m42.693s
+sys	0m11.659s
+./timer.sh: line 5:  7262 Segmentation fault      ./optimized_cudadist $2
+
+real	3m42.634s
+user	2m43.475s
+sys	0m11.418s
+./timer.sh: line 5:  7315 Segmentation fault      ./optimized_cudadist $2
+
+real	3m45.859s
+user	2m39.134s
+sys	0m11.261s
+./timer.sh: line 5:  8781 Segmentation fault      ./optimized_cudadist $2
+
+real	3m50.832s
+user	2m44.995s
+sys	0m11.480s
