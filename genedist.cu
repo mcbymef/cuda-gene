@@ -2,7 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
-#include<cuda.h>
+#include <cuda.h>
 #include "genedist.h"
 
 char** nameList;
@@ -24,7 +24,6 @@ char* selectedGene;
 texture<int2, 1, cudaReadModeElementType> geneTex;
 
 __global__ void calculateDistanceGPU(double* distance_d, int geneCount) {
-
 
     __shared__ double s_genes[32 * REPLICATES_PER_GENE];
     __shared__ double results[1024];

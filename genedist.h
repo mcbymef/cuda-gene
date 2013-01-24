@@ -8,20 +8,20 @@ typedef struct __align__(16) {
     double distance;
 } DistanceTuple;
 
-void getCardSpecs();
-
-bool isValidName(char* name);
-
-void trim(char* str);
-
-void usage(void);
-
-void createGeneListFromFile(FILE* file, double* geneList);
-
 void calculateSingleDistance(char* gene, double* geneList, double* distanceList);
 
 void calculateDistanceCPU(double* geneList, DistanceTuple** distanceMatrix);
 
+int compareDistanceTuple (const void* a, const void* b);
+
+void createGeneListFromFile(FILE* file, double* geneList);
+
+void getCardSpecs();
+
+bool isValidName(char* name);
+
 void sortAndPrint(double* geneList, double* distance, DistanceTuple** distanceMatrix);
 
-int compareDistanceTuple (const void* a, const void* b);
+void trim(char* str);
+
+void usage(void);
