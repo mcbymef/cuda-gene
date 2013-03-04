@@ -18,7 +18,14 @@ unsigned char calculateAllGenes = 1;
 //May be unable to use CUDA due to GPU memory unavilability
 unsigned char canUseCuda;
 
+//User specified gene, set by command line argument (optional)
 char* selectedGene;
+
+//User specified plates, set by command line argument (optional)
+int* selectedPlates;
+
+//User specified threshold value, set by command line argumetn(optional)
+int thresholdPPIB;
 
 //Texture memory will be used to store gene information
 texture<int2, 1, cudaReadModeElementType> geneTex;
@@ -88,6 +95,55 @@ __global__ void calculateDistanceGPU(double* distance_d, int geneCount) {
     }
 }
 
+void parseArguments(int argc, char** argv) {
+
+    //User has requested help, simply prints the usage
+    //NOTE: If the user wants to pass the "-h" option, no input file can be specified and no other cmd line arduments can be specified
+    if(strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0) {
+        usage();
+        exit(0);
+    }
+    
+    //The user has enetered a command line argument other than "-h" or "--help"
+    if(argc > 3) {
+        //Will need to loop through all cmd line arguments
+
+        for(int i = 2; i < argc; i+=2) {
+            if(strcmp(argv[i], "-r") == 0 || strcmp(argv[i], "--results") == 0) {
+  
+                numberOfResults = atoi(argv[i+1]);
+
+                //atoi() returns 0 when no valid conversion takes place, need to make sure numberOfResults is at least 1
+                if(!(numberOfResults > 0)) {
+                    printf("Error: number of results must be at least 1.\n");
+                    exit(1);
+                }
+            } else if (strcmp(argv[i], "-g") == 0 || strcmp(argv[i], "--gene") == 0) {
+               
+                selectedGene = argv[i+1];
+                calculateAllGenes = 0;
+
+            } else if (strcmp(argv[i], "-p") == 0 || strcmp(argv[i], "--plates") == 0) {
+
+            } else if (strcmp(argv[i], "-t") == 0 || strcmp(argv[i], "--thresholdPPIB") == 0) {
+
+                thresholdPPIB = atoi(argv[i+1]);
+
+                //atoi() returns 0 when on valid conversion takes place, need to make sure threshold PPIB is at least 1
+                if(!(thresholdPPIB > 0)) {
+                    printf("Error: threshold PPIB must be at least 1.\n");
+                    exit(1);
+                }
+
+            } else {
+                printf("Warning: %s is an invalid command line argument\n. See below for usage.\n\n", argv[i]);
+                usage();
+                exit(1);
+            }
+        }
+    }
+}
+
 int main(int argc, char** argv) {
 
     double* geneList_h, *geneList_d;
@@ -96,51 +152,9 @@ int main(int argc, char** argv) {
     //Only initialized if calculating all results and GPU is unavailable
     DistanceTuple** distanceMatrix;
 
-    //Program accepts 1 command line argument minimum and 3 maximum
-    if(!(argc == 2 || argc == 4 || argc == 6)) {
-        printf("Error: Incorrect number of arguments\n");
-        usage();
-        exit(1);
-    }
+    parseArguments(argc, argv);
 
-    //User has requested help, simply prints the usage
-    if(strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0) {
-        usage();
-        exit(0);
-    }
 
-    //Have one additional command line argument besides the required input file
-    if(argc > 3) {
-        if(strcmp(argv[2], "-g") == 0 || strcmp(argv[2], "--gene") == 0) {
-            selectedGene = argv[3];
-            calculateAllGenes = 0;
-        } else if (strcmp(argv[2], "-r") == 0 || strcmp(argv[2], "--results") == 0) {
-            numberOfResults = atoi(argv[3]);
-        } else {
-            printf("Error: %s must be either '-g' or '-r'\n", argv[2]);
-            usage();
-            exit(1);
-        }
-    } 
-    
-    if (argc > 5) {
-        if(strcmp(argv[4], "-g") == 0 || strcmp(argv[4], "--gene") == 0) {
-            selectedGene = argv[5];
-            calculateAllGenes = 0;
-        } else if (strcmp(argv[4], "-r") == 0 || strcmp(argv[4], "--results") == 0) {
-            numberOfResults = atoi(argv[5]);
-        } else {
-            printf("Error: %s must be either '-g' or '-r'\n", argv[4]);
-            usage();
-            exit(1);
-        }
-    }
-
-    //atoi() returns 0 when no valid conversion takes place, need to make sure numberOfResults is at least 1
-    if(!(numberOfResults > 0)) {
-        printf("Error: number of results must be at least 1. \n");
-        exit(1);
-    }
 
     char* filePath = argv[1];
 
@@ -362,7 +376,7 @@ void sortAndPrint(double* geneList, double* distance, DistanceTuple** distanceMa
             exit(1);
         }
 
-        int startIndex = (calculateAllGenes && canUseCuda || !calculateAllGenes) ? 1 : 0;
+        int startIndex = ((calculateAllGenes && canUseCuda) || !calculateAllGenes) ? 1 : 0;
 
         for(int j = startIndex; j < numberOfResults + 1; j++) {
             fprintf(outfile, "%d: %s %f\n", j, nameList[tempDistanceList[j].geneOne], tempDistanceList[j].distance);
@@ -477,9 +491,12 @@ int compareDistanceTuple (const void * a, const void * b) {
 
 void usage(void) {
     printf("Please enter the path of the input file as your first command line argument.\n");
-    printf("Valid additional arguments include: \n\t -h, --help: displays this usage message\n");
-    printf("\t-r, --results: specify the number of results to save for each gene\n");
-    printf("\t-g, --gene: specify a specific gene to generate results for\n");
+    printf("Valid additional arguments include:\n\n");
+    printf("\t-h, --help: displays this usage message\n\n");
+    printf("\t-r, --results: specify the number of results to save for each gene\n\n");
+    printf("\t-g, --gene: specify a specific gene to generate results for\n\n");
+    printf("\t-t, --thresholdPPIB: any genes with a PPIB lower than the number specified here will not be included in the calculations\n\n");
+    printf("\t-p, --plates: specify which specific plates will be included in the calculations\n\n");
 }
 
 bool isValidName(char* name) {
