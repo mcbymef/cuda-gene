@@ -22,17 +22,20 @@ unsigned char canUseCuda;
 char* selectedGene;
 
 //User specified plates, set by command line argument (optional)
-int* selectedPlates;
+int* selectedPlates = NULL;
+int  numSelectedPlates = -1;
 
-//User specified threshold value, set by command line argumetn(optional)
-int thresholdPPIB;
+//User specified threshold value, set by command line argument(optional)
+//Default is -1 which indicates value was not set by user and no threshold
+//PPIB will be used (all genes will be included in the calculations)
+int thresholdPPIB = -1;
 
 //Texture memory will be used to store gene information
 texture<int2, 1, cudaReadModeElementType> geneTex;
 
 __global__ void calculateDistanceGPU(double* distance_d, int geneCount) {
 
-    __shared__ double s_genes[32 * REPLICATES_PER_GENE];
+    __shared__ double s_genes[32 * DISTANCES_PER_GENE];
     __shared__ double results[1024];
 
     double dist = 0.0;
@@ -40,12 +43,12 @@ __global__ void calculateDistanceGPU(double* distance_d, int geneCount) {
     int geneIndex = blockIdx.x * blockDim.x + threadIdx.x;
 
     //Fill own gene (these memory accesses are not very much fun but can't be avoided if we use texture memory)
-    double curr_gene[REPLICATES_PER_GENE];
+    double curr_gene[DISTANCES_PER_GENE];
 
     if(geneIndex < geneCount) {
 
-        for(int i = 0; i < REPLICATES_PER_GENE; i++) {
-        	int2 v = tex1Dfetch(geneTex, geneIndex * REPLICATES_PER_GENE + i);
+        for(int i = 0; i < DISTANCES_PER_GENE; i++) {
+        	int2 v = tex1Dfetch(geneTex, geneIndex * DISTANCES_PER_GENE + i);
         	curr_gene[i] = __hiloint2double(v.y, v.x);
         }
 
@@ -54,19 +57,19 @@ __global__ void calculateDistanceGPU(double* distance_d, int geneCount) {
         for(int i = 0; i < top; i++) {
 
             //Fill the shared input array collaboratively 
-        	for(int j = 0; j < REPLICATES_PER_GENE; j++) {
+        	for(int j = 0; j < DISTANCES_PER_GENE; j++) {
 
         		//Make sure the gene being loaded is in bounds (the number of genes will likely not be divisible by 32, so the last block
                 //will not have 32 valid array indeces to access
         		if(!(i == top - 1 && threadIdx.x > 3 )) {
-        		    int2 v = tex1Dfetch(geneTex, (i * 32 * REPLICATES_PER_GENE) + (threadIdx.x * REPLICATES_PER_GENE) + j);
-        		    s_genes[threadIdx.x * REPLICATES_PER_GENE + j] =  __hiloint2double(v.y, v.x);
+        		    int2 v = tex1Dfetch(geneTex, (i * 32 * DISTANCES_PER_GENE) + (threadIdx.x * DISTANCES_PER_GENE) + j);
+        		    s_genes[threadIdx.x * DISTANCES_PER_GENE + j] =  __hiloint2double(v.y, v.x);
         		}
         	}
 
             for(int j = 0; j < 32; j++) {
 
-            	int offset = REPLICATES_PER_GENE * j;
+            	int offset = DISTANCES_PER_GENE * j;
 
             	dist	=    __dsqrt_rz(pow(s_genes[0 + offset] - curr_gene[0],2) + pow(s_genes[1 + offset] - curr_gene[1],2) +
             			     pow(s_genes[2 + offset] - curr_gene[2],2) + pow(s_genes[3 + offset] - curr_gene[3],2) +
@@ -103,7 +106,7 @@ void parseArguments(int argc, char** argv) {
         usage();
         exit(0);
     }
-    
+   
     //The user has enetered a command line argument other than "-h" or "--help"
     if(argc > 3) {
         //Will need to loop through all cmd line arguments
@@ -124,7 +127,28 @@ void parseArguments(int argc, char** argv) {
                 calculateAllGenes = 0;
 
             } else if (strcmp(argv[i], "-p") == 0 || strcmp(argv[i], "--plates") == 0) {
+                //Format will be numbers separated by commas
 
+		//First malloc some space in the selectedPlates array
+                //Because size is not know at compile time, make array as big as number of characters in the string
+                //This is obviously overkill but will always have enough room for any arbitrary number of plates
+                selectedPlates = (int*) malloc(strlen(argv[i+1]) * sizeof(int));
+
+                //If there is only one plate selected, don't need to tokenize the string
+                if(strlen(argv[i+1]) == 1) {
+                    numSelectedPlates = 1;
+                    selectedPlates[0] = atoi(argv[i+1]);
+                } else {
+
+                    char* tok = strtok(argv[i+1], ",");
+                    numSelectedPlates = 0;
+
+                    while(tok != NULL) {
+                        selectedPlates[numSelectedPlates] = atoi(tok);
+                        tok = strtok(NULL, ",");
+                        numSelectedPlates++;
+                    }
+                }
             } else if (strcmp(argv[i], "-t") == 0 || strcmp(argv[i], "--thresholdPPIB") == 0) {
 
                 thresholdPPIB = atoi(argv[i+1]);
@@ -153,21 +177,19 @@ int main(int argc, char** argv) {
     DistanceTuple** distanceMatrix;
 
     parseArguments(argc, argv);
-
-
-
+    
     char* filePath = argv[1];
 
-    FILE* file;
+    FILE* inputFile;
 
-    if(!(file = fopen(filePath, "r"))) {
+    if(!(inputFile = fopen(filePath, "r"))) {
         //File does not exist
         printf("Error: unable to open input file %s\n", filePath);
         exit(1);
     }
 
     //Allocate memory for the gene list on the host
-    geneList_h = (double *) malloc(MAX_GENES * sizeof(double) * REPLICATES_PER_GENE);
+    geneList_h = (double *) malloc(MAX_GENES * sizeof(double) * DISTANCES_PER_GENE);
 
     //Allocate memory for the name list on the host
     nameList = (char **) malloc(MAX_GENES * sizeof(char*));
@@ -177,10 +199,10 @@ int main(int argc, char** argv) {
     }
 
     //File exists so continue
-    createGeneListFromFile(file, geneList_h);
+    createGeneListFromFile(inputFile, geneList_h);
 
     //Close input file
-    fclose(file);
+    fclose(inputFile);
 
     if(numberOfResults > geneCount - 1) {
         printf("Error: number of results requested  exceeds maximum allowable number.\n");
@@ -189,7 +211,7 @@ int main(int argc, char** argv) {
         numberOfResults = geneCount - 1;
     }
 
-    int geneListSize = geneCount * REPLICATES_PER_GENE * sizeof(double);
+    int geneListSize = geneCount * DISTANCES_PER_GENE * sizeof(double);
 
     printf("Number of genes: %d\n", geneCount);
 
@@ -199,7 +221,6 @@ int main(int argc, char** argv) {
     }
 
     //Launch the CUDA portion of the code if calculating distances for all genes
-
     printf("CUDA status (0 - cannot use, 1 - using): %d\n", canUseCuda);
 
     if(!canUseCuda) {
@@ -292,10 +313,18 @@ void getCardSpecs() {
     int devCount;
     cudaGetDeviceCount(&devCount);
 
+    size_t freemem, totmem;
+
+
+    cudaMemGetInfo(&freemem, &totmem);
+
+    printf("Total mem: %d\n", totmem);
+    printf("Free mem:  %d\n", freemem);
+
     cudaDeviceProp props;
     cudaGetDeviceProperties(&props, 0);
 
-    long long geneListSize = REPLICATES_PER_GENE * 18 * geneCount * sizeof(double);
+    long long geneListSize = DISTANCES_PER_GENE * 18 * geneCount * sizeof(double);
     long long resultsSize = geneCount * geneCount * sizeof(double);
 
     if(props.totalGlobalMem == 0) {
@@ -325,7 +354,7 @@ void sortAndPrint(double* geneList, double* distance, DistanceTuple** distanceMa
 
     for(int  i = 0; i < top; i++) {
 
-        if(calculateAllGenes && canUseCuda) {
+        if(calculateAllGenes && canUseCuda || !calculateAllGenes) {
             for(int j = 0; j < geneCount; j++) {
                 tempDistanceList[j].distance = distance[(i*geneCount) + j];
                 tempDistanceList[j].geneOne = j;
@@ -379,7 +408,7 @@ void sortAndPrint(double* geneList, double* distance, DistanceTuple** distanceMa
         int startIndex = ((calculateAllGenes && canUseCuda) || !calculateAllGenes) ? 1 : 0;
 
         for(int j = startIndex; j < numberOfResults + 1; j++) {
-            fprintf(outfile, "%d: %s %f\n", j, nameList[tempDistanceList[j].geneOne], tempDistanceList[j].distance);
+            fprintf(outfile, "%d: %s %.15f\n", j, nameList[tempDistanceList[j].geneOne], tempDistanceList[j].distance);
         }
 
         fclose(outfile);
@@ -407,11 +436,11 @@ void calculateSingleDistance(char* gene, double* geneList, double* distanceList)
 
     double dist = 0.0;
 
-    int currOffset = currGeneIndex * REPLICATES_PER_GENE;
+    int currOffset = currGeneIndex * DISTANCES_PER_GENE;
 
     for(int i = 0; i < geneCount; i++) {
 
-        int tmpOffset = i * REPLICATES_PER_GENE;
+        int tmpOffset = i * DISTANCES_PER_GENE;
 
         dist = sqrt(pow(geneList[0 + tmpOffset] - geneList[0 + currOffset],2) + pow(geneList[1 + tmpOffset] - geneList[1 + currOffset],2) +
                     pow(geneList[2 + tmpOffset] - geneList[2 + currOffset],2) + pow(geneList[3 + tmpOffset] - geneList[3 + currOffset],2) +
@@ -445,13 +474,13 @@ void calculateDistanceCPU(double* geneList, DistanceTuple** distanceMatrix) {
     
         currGeneIndex = i;
     
-        currOffset = currGeneIndex * REPLICATES_PER_GENE;
+        currOffset = currGeneIndex * DISTANCES_PER_GENE;
         
         distColIndex = 0;
     
         for(int j = i+1; j < geneCount; j++) {
     
-            tmpOffset = j * REPLICATES_PER_GENE;
+            tmpOffset = j * DISTANCES_PER_GENE;
             
             dist = sqrt(pow(geneList[0 + tmpOffset] - geneList[0 + currOffset],2) + pow(geneList[1 + tmpOffset] - geneList[1 + currOffset],2) +
                         pow(geneList[2 + tmpOffset] - geneList[2 + currOffset],2) + pow(geneList[3 + tmpOffset] - geneList[3 + currOffset],2) +
@@ -496,30 +525,27 @@ void usage(void) {
     printf("\t-r, --results: specify the number of results to save for each gene\n\n");
     printf("\t-g, --gene: specify a specific gene to generate results for\n\n");
     printf("\t-t, --thresholdPPIB: any genes with a PPIB lower than the number specified here will not be included in the calculations\n\n");
-    printf("\t-p, --plates: specify which specific plates will be included in the calculations\n\n");
+    printf("\t-p, --plates: specify which specific plates will be included in the calculations. Format is: plate,plate,plate e.g. '-p 1,5,6' will calculate for only plates 1, 5, and 6.\n\n");
 }
 
-bool isValidName(char* name) {
+unsigned char isSelectedPlate(int plateNumber) {
 
-    if(strcmp(name, "analyte11") == 0) {
-        return false;
-    } else if (strcmp(name, "siControl") == 0) {
-        return false;
-    } else if (strcmp(name, "Gene Symbol") == 0) {
-        return false;
-    } else if (strcmp(name, "siCONT") == 0) {
-        return false;
-    }else if (*name == 13) {
-        return false;
+    for(int i = 0; i < numSelectedPlates; i++) {
+        if(selectedPlates[i] == plateNumber) {
+            return 1;
+        }
     }
 
-    return true;
+    return 0;
 }
 
 void createGeneListFromFile(FILE* file, double* geneList) {
 
-    char line[256];
+    char line[512];
+    int ppib;
 
+    //Eat the header line
+    fgets( line, sizeof(line), file);
 
     while(fgets( line, sizeof(line),  file ) != NULL)
     {
@@ -533,24 +559,55 @@ void createGeneListFromFile(FILE* file, double* geneList) {
         }
         tok = strtok(line,",");
 
-        if(tok && isValidName(tok)) {
+        //Check to ensure tok is not null and that it is not a control
+        if(tok && strcmp(tok, "FALSE") == 0) {
+
+            //Get the plate number (next token)
+            tok = strtok(NULL,",");
+
+            //check to ensure the plate number is wanted for this calculation
+            if(numSelectedPlates != -1 && !isSelectedPlate(atoi(tok))) {
+                goto out;
+            }
+
+            //Get the Gene Name (next token)
+            tok = strtok(NULL,",");
 
             strcpy(nameList[geneCount], tok);
 
             //Eliminate unwanted characters (spaces, slashes)
             trim(nameList[geneCount]);
 
-            //Populate replicates into geneList
+            //Populate distances into geneList
             for(int i = 0; i < REPLICATES_PER_GENE; i++) {
-                tok = strtok(NULL,",");
 
-                if(strcmp(tok,"=") == 0) {
-                    geneList[i + (geneCount * REPLICATES_PER_GENE)] = 0.0f;
-                } else {
-                    geneList[i + (geneCount * REPLICATES_PER_GENE)] = atof(tok);
+                for(int j = 0; j < PROBES_PER_REPLICATE; j++) {
+                    tok = strtok(NULL,",");
+
+                    if(strcmp(tok,"=") == 0) {
+                        //Dont count these genes for now - may change later
+                    
+                        //This just cancels out the increment after this loop
+                        geneCount--;
+                        goto out;
+
+                        //geneList[j + (geneCount * DISTANCES_PER_GENE)] = 0.0f;
+                    } else {
+                        geneList[(geneCount * DISTANCES_PER_GENE) + (PROBES_PER_REPLICATE * i) + j] = atof(tok);
+                    }
+                }
+
+                //Grab the PPIB
+                ppib = atoi(strtok(NULL, ","));
+
+                //Deal with a gene that has an unacceptable PPIB
+                if(thresholdPPIB != -1 && ppib < thresholdPPIB) {
+                    geneCount--;
+                    goto out;
                 }
             }
-        geneCount++;
+		out:
+		    geneCount++;
         }
     }
 }
