@@ -74,7 +74,7 @@ void calculateDistances(char* gene) {
 
     Gene *curr_gene; 
     bool foundGene = false;
-
+/*
     for(int i = 0; i < geneCount; i++) {
         curr_gene = geneList[i];
         if(strcmp(curr_gene->name,gene) == 0) {
@@ -88,21 +88,22 @@ void calculateDistances(char* gene) {
         printf("Warning: unable to find specified gene. Program will exit.\n");
         exit(1);
     }
+ */   
+
+    DistanceTuple **distanceList = malloc(sizeof(DistanceTuple*) * geneCount);
+
+    for(int i = 0; i < geneCount; i++) {
+        distanceList[i] = malloc(sizeof(DistanceTuple) * geneCount);
+    }
     
 
-    //DistanceTuple **distanceList = malloc(sizeof(DistanceTuple*) * geneCount);
-
-    //for(int i = 0; i < geneCount; i++) {
-    //    distanceList[i] = malloc(sizeof(DistanceTuple) * geneCount);
-    //}
-    //
-
-    DistanceTuple distanceList[geneCount];
+    //DistanceTuple distanceList[geneCount];
 
     double dist1 = 0.0, dist2 = 0.0, dist3 = 0.0, avgdist = 0.0, sumdist = 0.0;
-   // for(int i = 0; i < geneCount; i++) {
+    for(int i = 0; i < geneCount; i++) {
         
-   //     curr_gene = geneList[i];
+        curr_gene = geneList[i];
+
         for(int j = 0; j < geneCount; j++) {
             
             Gene *tmp = geneList[j];
@@ -123,12 +124,12 @@ void calculateDistances(char* gene) {
 
             sumdist = dist1 + dist2 + dist3;
 
-            distanceList[j].geneIndex = j;
+            distanceList[i][j].geneIndex = j;
             //distanceList[j].distance = avgdist;
-            distanceList[j].distance = sumdist;
+            distanceList[i][j].distance = sumdist;
         }
 
-        qsort (distanceList, geneCount, sizeof(DistanceTuple), compareDistanceTuple);
+        qsort (distanceList[i], geneCount, sizeof(DistanceTuple), compareDistanceTuple);
 
         char fname[40];
         strcpy(fname, "output/");
@@ -143,13 +144,13 @@ void calculateDistances(char* gene) {
             exit(1);
         }
 
-        for(int j = 1; j < geneCount; j++) {
-            fprintf(outfile, "%d: %s %f\n", j, geneList[distanceList[j].geneIndex]->name, distanceList[j].distance);
+        for(int j = 1; j < 11; j++) {
+            fprintf(outfile, "%d: %s %f\n", j, geneList[distanceList[i][j].geneIndex]->name, distanceList[i][j].distance);
         }
 
         fclose(outfile);
   
-    // }
+     }
 }
 
 void trim(char *str) {

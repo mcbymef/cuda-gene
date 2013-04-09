@@ -149,6 +149,7 @@ void parseArguments(int argc, char** argv) {
                         numSelectedPlates++;
                     }
                 }
+
             } else if (strcmp(argv[i], "-t") == 0 || strcmp(argv[i], "--thresholdPPIB") == 0) {
 
                 thresholdPPIB = atoi(argv[i+1]);
@@ -204,6 +205,17 @@ int main(int argc, char** argv) {
     //Close input file
     fclose(inputFile);
 
+    printf("Read file successfully.\n");
+
+    if(geneCount == 1) {
+        printf("Only one gene found that meets specified criteria. Please provide new criteria to expand number of eligible genes.\n");
+        exit(0);
+    }
+
+    if(geneCount < 11) {
+        numberOfResults = geneCount - 2;
+    }
+
     if(numberOfResults > geneCount - 1) {
         printf("Error: number of results requested  exceeds maximum allowable number.\n");
         printf("Number of genes: %d, maximum number of results per gene: %d\n", geneCount, geneCount-1);
@@ -219,9 +231,22 @@ int main(int argc, char** argv) {
         //Get memory specifications of the GPU
         getCardSpecs();
     }
+/*
+    //For now, when calculating a subset, serial is used. Realistically there will just be a threshold number of genes
+    //that determines when CUDA is used and when it's not
+    if(numSelectedPlates != -1 || thresholdPPIB != -1) {
+        canUseCuda = 0;
+    }
+*/
+
+
+
+    if(geneCount < CUDA_CUTOFF) {
+        canUseCuda = 0;
+    }
 
     //Launch the CUDA portion of the code if calculating distances for all genes
-    printf("CUDA status (0 - cannot use, 1 - using): %d\n", canUseCuda);
+    printf("CUDA status (0 - not using, 1 - using): %d\n", canUseCuda);
 
     if(!canUseCuda) {
         printf("Program will continue in serial mode...\n");
@@ -233,14 +258,29 @@ int main(int argc, char** argv) {
         long long resultsSize = geneCount * geneCount * sizeof(double);
 
         dim3 blockSize = 32;
-        dim3 gridSize = (geneCount % 32 == 0) ? geneCount/32 : geneCount/32 + 1;
+        dim3 gridSize = 0;     
+ 
+        //An input size of 24000 genes will fit comfortably on 5GB of memory
+        if(geneCount < 24000) {
+            gridSize = (geneCount % 32 == 0) ? geneCount/32 : geneCount/32 + 1;
+            cudaMalloc((void**) &distance_d, resultsSize);
+        } else {
+           //For a full input of 33,000, need to have 2 kernal calls
+           //This means grids are half size as well as results on the device
+
+           //Ceiling of geneCount/2
+           int tmpCount = 1 + ((geneCount - 1) / 2);
+
+           //GridSize is half of total size needed
+           gridSize = ((tmpCount % 32) == 0) ? geneCount/64 : geneCount/64 + 1; 
+           cudaMalloc((void**) &distance_d, resultsSize/2);
+        }
 
         //Allocate space on the host for the distance results
         distance_h = (double*) malloc(resultsSize);
 
         //Allocate memory on the device for the genelist and distance results
         cudaMalloc((void**) &geneList_d, geneListSize);
-        cudaMalloc((void**) &distance_d, resultsSize);
 
         //Copy the gene list to the device
         cudaMemcpy(geneList_d, geneList_h, geneListSize, cudaMemcpyHostToDevice);
@@ -408,7 +448,7 @@ void sortAndPrint(double* geneList, double* distance, DistanceTuple** distanceMa
         int startIndex = ((calculateAllGenes && canUseCuda) || !calculateAllGenes) ? 1 : 0;
 
         for(int j = startIndex; j < numberOfResults + 1; j++) {
-            fprintf(outfile, "%d: %s %.15f\n", j, nameList[tempDistanceList[j].geneOne], tempDistanceList[j].distance);
+            fprintf(outfile, "%d: %s %.15f\n", startIndex ? j : j+1, nameList[tempDistanceList[j].geneOne], tempDistanceList[j].distance);
         }
 
         fclose(outfile);
@@ -551,6 +591,10 @@ void createGeneListFromFile(FILE* file, double* geneList) {
     {
         char* tok;
         int len = strlen(line);
+
+        //Reset PPIB value for each gene
+        ppib = 0;
+
         if(len > 0 && line[len-1]=='\n'){
             line[len-1] = '\0';
         }
@@ -573,6 +617,7 @@ void createGeneListFromFile(FILE* file, double* geneList) {
             //Get the Gene Name (next token)
             tok = strtok(NULL,",");
 
+            //Store the name of the gene in the nameList
             strcpy(nameList[geneCount], tok);
 
             //Eliminate unwanted characters (spaces, slashes)
@@ -584,30 +629,32 @@ void createGeneListFromFile(FILE* file, double* geneList) {
                 for(int j = 0; j < PROBES_PER_REPLICATE; j++) {
                     tok = strtok(NULL,",");
 
-                    if(strcmp(tok,"=") == 0) {
-                        //Dont count these genes for now - may change later
-                    
-                        //This just cancels out the increment after this loop
-                        geneCount--;
+                    if(strcmp(tok,"=") == 0 || strcmp(tok,"#N/A") == 0) {
+                        
+                        //Break out of nested loops, if one replicate of a gene is invalid, the entire gene is invalid
+                        //There is no need to parse any more of this line
                         goto out;
 
-                        //geneList[j + (geneCount * DISTANCES_PER_GENE)] = 0.0f;
                     } else {
                         geneList[(geneCount * DISTANCES_PER_GENE) + (PROBES_PER_REPLICATE * i) + j] = atof(tok);
                     }
                 }
-
-                //Grab the PPIB
-                ppib = atoi(strtok(NULL, ","));
-
-                //Deal with a gene that has an unacceptable PPIB
-                if(thresholdPPIB != -1 && ppib < thresholdPPIB) {
-                    geneCount--;
-                    goto out;
-                }
+                //Read the PPIB value, add to ppib total
+                ppib += atoi(strtok(NULL, ","));
             }
-		out:
-		    geneCount++;
+            
+            //Calculate the average of the PPIBs for each replicate
+            ppib /= 3;
+
+            //Remove a gene that has a sub-threshold PPIB (first check to see that a threshold PPIB has been set)
+            if(thresholdPPIB != -1 && ppib < thresholdPPIB) {
+               goto out;
+            }
+
+            //Label to break out of nested loops above
+	    geneCount++;
+
+            out:
         }
     }
 }

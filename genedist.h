@@ -3,6 +3,7 @@
 #define PROBES_PER_REPLICATE 6
 #define DISTANCES_PER_GENE (REPLICATES_PER_GENE * PROBES_PER_REPLICATE)
 #define MAX_NAME_SIZE 20
+#define CUDA_CUTOFF 4000
 
 typedef struct __align__(16) {
     unsigned int geneOne;
