@@ -259,6 +259,8 @@ int main(int argc, char** argv) {
 
         dim3 blockSize = 32;
         dim3 gridSize = 0;     
+
+        int numIterations = 1;
  
         //An input size of 24000 genes will fit comfortably on 5GB of memory
         if(geneCount < 24000) {
@@ -288,17 +290,20 @@ int main(int argc, char** argv) {
         //Bind geneList to texture memory
         cudaBindTexture(NULL, geneTex, geneList_d, geneListSize);
 
-        calculateDistanceGPU<<<gridSize,blockSize>>>(distance_d, geneCount);
+        for(int i = 0; i < numIterations; i++) {
 
-        cudaError_t error = cudaGetLastError();
+            calculateDistanceGPU<<<gridSize,blockSize>>>(distance_d, geneCount);
 
-        if(error != cudaSuccess) {
-    	    printf("CUDA error: %s\n", cudaGetErrorString(error));
-    	    exit(1);
+            cudaError_t error = cudaGetLastError();
+
+            if(error != cudaSuccess) {
+    	        printf("CUDA error: %s\n", cudaGetErrorString(error));
+    	        exit(1);
+            }
+
+            //Get results back from the kernel
+            cudaMemcpy(distance_h, distance_d, resultsSize, cudaMemcpyDeviceToHost);
         }
-
-        //Get results back from the kernel
-        cudaMemcpy(distance_h, distance_d, resultsSize, cudaMemcpyDeviceToHost);
 
         cudaUnbindTexture(geneTex);
         cudaFree(geneList_d);
