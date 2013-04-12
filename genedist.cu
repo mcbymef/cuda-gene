@@ -32,15 +32,15 @@ int thresholdPPIB = -1;
 
 //User specified output file save location
 //DEFAULT: "output/"
-char outputLocation[100] = "output/";
+char outputLocation[200] = "output/";
 
 //User specified input file location
-char inputLocation[100] = "none";
+char inputLocation[200] = "none";
 
 //Texture memory will be used to store gene information
 texture<int2, 1, cudaReadModeElementType> geneTex;
 
-__global__ void calculateDistanceGPU(double* distance_d, int geneCount) {
+__global__ void calculateDistanceGPU(double* distance_d, int geneCount, int iteration) {
 
     __shared__ double s_genes[32 * DISTANCES_PER_GENE];
     __shared__ double results[1024];
@@ -49,17 +49,32 @@ __global__ void calculateDistanceGPU(double* distance_d, int geneCount) {
 
     int geneIndex = blockIdx.x * blockDim.x + threadIdx.x;
 
+    //Account for multiple kernel calls offset
+    geneIndex += (iteration * geneCount/2);
+
     //Fill own gene (these memory accesses are not very much fun but can't be avoided if we use texture memory)
     double curr_gene[DISTANCES_PER_GENE];
 
     if(geneIndex < geneCount) {
 
         for(int i = 0; i < DISTANCES_PER_GENE; i++) {
-        	int2 v = tex1Dfetch(geneTex, geneIndex * DISTANCES_PER_GENE + i);
+        	int2 v = tex1Dfetch(geneTex, (geneIndex * DISTANCES_PER_GENE) + i);
         	curr_gene[i] = __hiloint2double(v.y, v.x);
         }
 
-        int top = (geneCount % 32 == 0) ? geneCount/32 : geneCount/32 + 1;
+        int top = 0;
+
+        if(geneCount < TWO_KERNEL_THRESHOLD) {
+            top = (geneCount % 32 == 0) ? geneCount/32 : geneCount/32 + 1;
+
+        } else {
+
+           //Ceiling of geneCount/2
+           int tmpCount = 1 + ((geneCount - 1) / 2);
+
+           //top is half of total size needed
+           top = ((tmpCount % 32) == 0) ? geneCount/64 : geneCount/64 + 1;
+        }
 
         for(int i = 0; i < top; i++) {
 
@@ -69,7 +84,7 @@ __global__ void calculateDistanceGPU(double* distance_d, int geneCount) {
         	//Make sure the gene being loaded is in bounds (the number of genes will likely not be divisible by 32, so the last block
                 //will not have 32 valid array indices to access
         	    if(!(i == top - 1 && threadIdx.x > 3 )) {
-        	        int2 v = tex1Dfetch(geneTex, (i * 32 * DISTANCES_PER_GENE) + (threadIdx.x * DISTANCES_PER_GENE) + j);
+        	        int2 v = tex1Dfetch(geneTex, ((i + (iteration * geneCount/2)) * 32 * DISTANCES_PER_GENE) + (threadIdx.x * DISTANCES_PER_GENE) + j);
         	        s_genes[threadIdx.x * DISTANCES_PER_GENE + j] =  __hiloint2double(v.y, v.x);
                     }
                 }
@@ -95,7 +110,7 @@ __global__ void calculateDistanceGPU(double* distance_d, int geneCount) {
 
             	int sharedoffset = j* 32;
 
-                int globaloffset = (blockIdx.x * 32 * geneCount) + (j * geneCount) + (32 * i);
+                int globaloffset = (blockIdx.x * 32 * geneCount) + (j * geneCount) + (32 * (i + (iteration * geneCount/2)));
 
                 if(threadIdx.x + globaloffset < geneCount * geneCount) {
             	    distance_d[threadIdx.x + globaloffset ] = results[threadIdx.x + sharedoffset];
@@ -241,7 +256,7 @@ int main(int argc, char** argv) {
     }
 
     if(numberOfResults > geneCount - 1) {
-        printf("Error: number of results requested  exceeds maximum allowable number.\n");
+        printf("Error: number of results requested exceeds maximum allowable number.\n");
         printf("Number of genes: %d, maximum number of results per gene: %d\n", geneCount, geneCount-1);
         printf("Number of results will be set to maximum. All results will be saved.\n");
         numberOfResults = geneCount - 1;
@@ -277,8 +292,7 @@ int main(int argc, char** argv) {
 
         int numIterations = 1;
  
-        //An input size of 24000 genes will fit comfortably on 5GB of memory
-        if(geneCount < 24000) {
+        if(geneCount < TWO_KERNEL_THRESHOLD) {
             gridSize = (geneCount % 32 == 0) ? geneCount/32 : geneCount/32 + 1;
             cudaMalloc((void**) &distance_d, resultsSize);
         } else {
@@ -290,7 +304,7 @@ int main(int argc, char** argv) {
 
            //GridSize is half of total size needed
            gridSize = ((tmpCount % 32) == 0) ? geneCount/64 : geneCount/64 + 1; 
-           cudaMalloc((void**) &distance_d, resultsSize/2);
+           cudaMalloc((void**) &distance_d, (resultsSize/2) + 1);
 
            numIterations = 2;
         }
@@ -309,11 +323,11 @@ int main(int argc, char** argv) {
 
         for(int i = 0; i < numIterations; i++) {
 
-            //Only ever going to have 2 kernal calls, need to make sure the whole gene list is covered
+            //Only ever going to have 2 kernel calls, need to make sure the whole gene list is covered
             //Genecount will be either even or odd
-        	//even case: both kernal calls get half gene list
-            //odd case: first kernal call gets genecount/2, 2nd one get genecount/2 + 1
-            calculateDistanceGPU<<<gridSize,blockSize>>>(distance_d, geneCount + (i * (geneCount % 2)));
+        	//even case: both kernel calls get half gene list
+            //odd case: first kernel call gets genecount/2, 2nd one get genecount/2 + 1
+            calculateDistanceGPU<<<gridSize,blockSize>>>(distance_d, geneCount + (i * (geneCount % 2)), i);
 
             cudaError_t error = cudaGetLastError();
 
@@ -323,7 +337,7 @@ int main(int argc, char** argv) {
             }
 
             //Get results back from the kernel
-            cudaMemcpy(distance_h, distance_d, resultsSize, cudaMemcpyDeviceToHost);
+            cudaMemcpy(distance_h + (i * geneCount * geneCount / 2), distance_d, resultsSize, cudaMemcpyDeviceToHost);
         }
 
         cudaUnbindTexture(geneTex);
