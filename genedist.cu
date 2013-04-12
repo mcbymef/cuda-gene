@@ -9,14 +9,14 @@ char** nameList;
 
 int geneCount = 0;
 
-//Number of results that will be saved for each gene
-int numberOfResults = 10;
-
 //Determines if the program will run for all genes or a single one
-unsigned char calculateAllGenes = 1;
+unsigned char singleGeneCalculation = 0;
 
 //May be unable to use CUDA due to GPU memory unavilability
 unsigned char canUseCuda;
+
+//User provided parameter, number of results that will be saved for each gene
+int numberOfResults = 10;
 
 //User specified gene, set by command line argument (optional)
 char* selectedGene;
@@ -29,6 +29,10 @@ int  numSelectedPlates = -1;
 //Default is -1 which indicates value was not set by user and no threshold
 //PPIB will be used (all genes will be included in the calculations)
 int thresholdPPIB = -1;
+
+//User specified output file save location
+//DEFAULT: "output/"
+char* outputLocation = "output/";
 
 //Texture memory will be used to store gene information
 texture<int2, 1, cudaReadModeElementType> geneTex;
@@ -59,13 +63,13 @@ __global__ void calculateDistanceGPU(double* distance_d, int geneCount) {
             //Fill the shared input array collaboratively 
         	for(int j = 0; j < DISTANCES_PER_GENE; j++) {
 
-        		//Make sure the gene being loaded is in bounds (the number of genes will likely not be divisible by 32, so the last block
-                //will not have 32 valid array indeces to access
-        		if(!(i == top - 1 && threadIdx.x > 3 )) {
-        		    int2 v = tex1Dfetch(geneTex, (i * 32 * DISTANCES_PER_GENE) + (threadIdx.x * DISTANCES_PER_GENE) + j);
-        		    s_genes[threadIdx.x * DISTANCES_PER_GENE + j] =  __hiloint2double(v.y, v.x);
-        		}
-        	}
+        	//Make sure the gene being loaded is in bounds (the number of genes will likely not be divisible by 32, so the last block
+                //will not have 32 valid array indices to access
+        	    if(!(i == top - 1 && threadIdx.x > 3 )) {
+        	        int2 v = tex1Dfetch(geneTex, (i * 32 * DISTANCES_PER_GENE) + (threadIdx.x * DISTANCES_PER_GENE) + j);
+        	        s_genes[threadIdx.x * DISTANCES_PER_GENE + j] =  __hiloint2double(v.y, v.x);
+                    }
+                }
 
             for(int j = 0; j < 32; j++) {
 
@@ -107,9 +111,9 @@ void parseArguments(int argc, char** argv) {
         exit(0);
     }
    
-    //The user has enetered a command line argument other than "-h" or "--help"
+    //The user has entered a command line argument other than "-h" or "--help"
     if(argc > 3) {
-        //Will need to loop through all cmd line arguments
+        //Will need to loop through all command line arguments
 
         for(int i = 2; i < argc; i+=2) {
             if(strcmp(argv[i], "-r") == 0 || strcmp(argv[i], "--results") == 0) {
@@ -124,12 +128,12 @@ void parseArguments(int argc, char** argv) {
             } else if (strcmp(argv[i], "-g") == 0 || strcmp(argv[i], "--gene") == 0) {
                
                 selectedGene = argv[i+1];
-                calculateAllGenes = 0;
+                singleGeneCalculation = 1;
 
             } else if (strcmp(argv[i], "-p") == 0 || strcmp(argv[i], "--plates") == 0) {
-                //Format will be numbers separated by commas
+                //Format will be numbers separated by commas (i.e. 123,233,11,22)
 
-		//First malloc some space in the selectedPlates array
+		        //First malloc some space in the selectedPlates array
                 //Because size is not know at compile time, make array as big as number of characters in the string
                 //This is obviously overkill but will always have enough room for any arbitrary number of plates
                 selectedPlates = (int*) malloc(strlen(argv[i+1]) * sizeof(int));
@@ -159,6 +163,10 @@ void parseArguments(int argc, char** argv) {
                     printf("Error: threshold PPIB must be at least 1.\n");
                     exit(1);
                 }
+
+            } else if (strcmp(argv[i], "-o") == 0 || strcmp(argv[i], "--output") ==0 ){
+
+            	outputLocation = argv[i+1];
 
             } else {
                 printf("Warning: %s is an invalid command line argument\n. See below for usage.\n\n", argv[i]);
@@ -227,19 +235,10 @@ int main(int argc, char** argv) {
 
     printf("Number of genes: %d\n", geneCount);
 
-    if(calculateAllGenes) {
+    if(!singleGeneCalculation) {
         //Get memory specifications of the GPU
         getCardSpecs();
     }
-/*
-    //For now, when calculating a subset, serial is used. Realistically there will just be a threshold number of genes
-    //that determines when CUDA is used and when it's not
-    if(numSelectedPlates != -1 || thresholdPPIB != -1) {
-        canUseCuda = 0;
-    }
-*/
-
-
 
     if(geneCount < CUDA_CUTOFF) {
         canUseCuda = 0;
@@ -252,7 +251,7 @@ int main(int argc, char** argv) {
         printf("Program will continue in serial mode...\n");
     }
 
-    if(calculateAllGenes && canUseCuda) {
+    if(!singleGeneCalculation && canUseCuda) {
 
         //There will be n^2 results from n genes
         long long resultsSize = geneCount * geneCount * sizeof(double);
@@ -276,6 +275,8 @@ int main(int argc, char** argv) {
            //GridSize is half of total size needed
            gridSize = ((tmpCount % 32) == 0) ? geneCount/64 : geneCount/64 + 1; 
            cudaMalloc((void**) &distance_d, resultsSize/2);
+
+           numIterations = 2;
         }
 
         //Allocate space on the host for the distance results
@@ -292,7 +293,11 @@ int main(int argc, char** argv) {
 
         for(int i = 0; i < numIterations; i++) {
 
-            calculateDistanceGPU<<<gridSize,blockSize>>>(distance_d, geneCount);
+            //Only ever going to have 2 kernal calls, need to make sure the whole gene list is covered
+            //Genecount will be either even or odd
+        	//even case: both kernal calls get half gene list
+            //odd case: first kernal call gets genecount/2, 2nd one get genecount/2 + 1
+            calculateDistanceGPU<<<gridSize,blockSize>>>(distance_d, geneCount + (i * (geneCount % 2)));
 
             cudaError_t error = cudaGetLastError();
 
@@ -311,7 +316,7 @@ int main(int argc, char** argv) {
 
         cudaDeviceReset();
 
-    } else if(calculateAllGenes && !canUseCuda) {
+    } else if(!singleGeneCalculation && !canUseCuda) {
 
         //Allocate memory for the distance matrix
         distanceMatrix = (DistanceTuple**) malloc(geneCount * sizeof(DistanceTuple*));
@@ -322,7 +327,7 @@ int main(int argc, char** argv) {
 
         calculateDistanceCPU(geneList_h, distanceMatrix);
 
-    } else if (!calculateAllGenes){
+    } else if (singleGeneCalculation){
 
         distance_h = (double *) malloc(geneCount * sizeof(double));
 
@@ -338,11 +343,11 @@ int main(int argc, char** argv) {
     free(geneList_h);
 
     //distance_h is only initialized when using CUDA
-    if(calculateAllGenes && canUseCuda) {
+    if((!singleGeneCalculation && canUseCuda) || singleGeneCalculation) {
         free(distance_h);
     }
 
-    if(calculateAllGenes && !canUseCuda) {
+    if(!singleGeneCalculation && !canUseCuda) {
         for(int i = 0; i < geneCount - 1; i++) {
             free(distanceMatrix[i]);
         }
@@ -395,16 +400,16 @@ void sortAndPrint(double* geneList, double* distance, DistanceTuple** distanceMa
     //Need to reconstruct a templist from the distance matrix for each gene
     DistanceTuple* tempDistanceList = (DistanceTuple*) malloc(geneCount * sizeof(DistanceTuple));
 
-    int top = (calculateAllGenes) ? geneCount : 1;
+    int top = (!singleGeneCalculation) ? geneCount : 1;
 
     for(int  i = 0; i < top; i++) {
 
-        if(calculateAllGenes && canUseCuda || !calculateAllGenes) {
+        if((!singleGeneCalculation && canUseCuda) || singleGeneCalculation) {
             for(int j = 0; j < geneCount; j++) {
                 tempDistanceList[j].distance = distance[(i*geneCount) + j];
                 tempDistanceList[j].geneOne = j;
             }
-        } else if (calculateAllGenes && !canUseCuda) {
+        } else if (!singleGeneCalculation && !canUseCuda) {
             
             int row, col, distanceIndex;
 
@@ -429,13 +434,13 @@ void sortAndPrint(double* geneList, double* distance, DistanceTuple** distanceMa
             }
         }
 
-        int listSize = (calculateAllGenes && canUseCuda || !calculateAllGenes) ? geneCount : geneCount - 1;
+        int listSize = ( (!singleGeneCalculation && canUseCuda)|| singleGeneCalculation) ? geneCount : geneCount - 1;
 
         qsort (tempDistanceList, listSize, sizeof(DistanceTuple), compareDistanceTuple);
 
         char fname[40];
-        strcpy(fname, "output/");
-        if(!calculateAllGenes) {
+        strcpy(fname, outputLocation);
+        if(singleGeneCalculation) {
             strcat(fname, selectedGene);
         } else {
             strcat(fname, nameList[i]);
@@ -450,9 +455,9 @@ void sortAndPrint(double* geneList, double* distance, DistanceTuple** distanceMa
             exit(1);
         }
 
-        int startIndex = ((calculateAllGenes && canUseCuda) || !calculateAllGenes) ? 1 : 0;
+        int startIndex = ((!singleGeneCalculation && canUseCuda) || singleGeneCalculation) ? 1 : 0;
 
-        for(int j = startIndex; j < numberOfResults + 1; j++) {
+        for(int j = startIndex; j < numberOfResults + startIndex; j++) {
             fprintf(outfile, "%d: %s %.15f\n", startIndex ? j : j+1, nameList[tempDistanceList[j].geneOne], tempDistanceList[j].distance);
         }
 
@@ -571,6 +576,7 @@ void usage(void) {
     printf("\t-g, --gene: specify a specific gene to generate results for\n\n");
     printf("\t-t, --thresholdPPIB: any genes with a PPIB lower than the number specified here will not be included in the calculations\n\n");
     printf("\t-p, --plates: specify which specific plates will be included in the calculations. Format is: plate,plate,plate e.g. '-p 1,5,6' will calculate for only plates 1, 5, and 6.\n\n");
+    printf("\t-o, --output: specify which folder the output results will be saved in\n\n");
 }
 
 unsigned char isSelectedPlate(int plateNumber) {
@@ -656,10 +662,10 @@ void createGeneListFromFile(FILE* file, double* geneList) {
                goto out;
             }
 
-            //Label to break out of nested loops above
-	    geneCount++;
+	        geneCount++;
 
             out:
+                continue;
         }
     }
 }
