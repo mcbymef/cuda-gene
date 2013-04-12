@@ -32,7 +32,10 @@ int thresholdPPIB = -1;
 
 //User specified output file save location
 //DEFAULT: "output/"
-char* outputLocation = "output/";
+char outputLocation[100] = "output/";
+
+//User specified input file location
+char inputLocation[100] = "none";
 
 //Texture memory will be used to store gene information
 texture<int2, 1, cudaReadModeElementType> geneTex;
@@ -104,19 +107,20 @@ __global__ void calculateDistanceGPU(double* distance_d, int geneCount) {
 
 void parseArguments(int argc, char** argv) {
 
-    //User has requested help, simply prints the usage
-    //NOTE: If the user wants to pass the "-h" option, no input file can be specified and no other cmd line arduments can be specified
-    if(strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0) {
-        usage();
-        exit(0);
-    }
-   
     //The user has entered a command line argument other than "-h" or "--help"
-    if(argc > 3) {
+    if(argc > 1) {
         //Will need to loop through all command line arguments
 
-        for(int i = 2; i < argc; i+=2) {
-            if(strcmp(argv[i], "-r") == 0 || strcmp(argv[i], "--results") == 0) {
+        for(int i = 1; i < argc; i+=2) {
+
+        	if (strcmp(argv[i], "-i") == 0 || strcmp(argv[i], "--input") == 0) {
+
+        		strcpy(inputLocation, argv[i+1]);
+
+        	} else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+                usage();
+                exit(0);
+        	} else if (strcmp(argv[i], "-r") == 0 || strcmp(argv[i], "--results") == 0) {
   
                 numberOfResults = atoi(argv[i+1]);
 
@@ -127,7 +131,7 @@ void parseArguments(int argc, char** argv) {
                 }
             } else if (strcmp(argv[i], "-g") == 0 || strcmp(argv[i], "--gene") == 0) {
                
-                selectedGene = argv[i+1];
+                strcpy(selectedGene,argv[i+1]);
                 singleGeneCalculation = 1;
 
             } else if (strcmp(argv[i], "-p") == 0 || strcmp(argv[i], "--plates") == 0) {
@@ -166,7 +170,11 @@ void parseArguments(int argc, char** argv) {
 
             } else if (strcmp(argv[i], "-o") == 0 || strcmp(argv[i], "--output") ==0 ){
 
-            	outputLocation = argv[i+1];
+            	strcpy(outputLocation, argv[i+1]);
+
+            	if(outputLocation[strlen(outputLocation) - 1] != '/') {
+            		outputLocation[strlen(outputLocation)] = '/';
+            	}
 
             } else {
                 printf("Warning: %s is an invalid command line argument\n. See below for usage.\n\n", argv[i]);
@@ -174,6 +182,10 @@ void parseArguments(int argc, char** argv) {
                 exit(1);
             }
         }
+    } else {
+    	printf("No command line arguments specified. Please see usage below.\n\n");
+    	usage();
+    	exit(1);
     }
 }
 
@@ -187,13 +199,17 @@ int main(int argc, char** argv) {
 
     parseArguments(argc, argv);
     
-    char* filePath = argv[1];
+    if(strcmp(inputLocation, "none") == 0) {
+    	printf("Warning: must provide an input file.\n\n");
+    	usage();
+    	exit(1);
+    }
 
     FILE* inputFile;
 
-    if(!(inputFile = fopen(filePath, "r"))) {
+    if(!(inputFile = fopen(inputLocation, "r"))) {
         //File does not exist
-        printf("Error: unable to open input file %s\n", filePath);
+        printf("Error: unable to open input file %s\n", inputLocation);
         exit(1);
     }
 
@@ -355,7 +371,7 @@ int main(int argc, char** argv) {
         free(distanceMatrix);
     }
 
-    printf("Done! Results have been stored in the \"output\" folder.\n");
+    printf("Done! Results have been stored in the \"%s\" folder.\n", outputLocation);
     return 0;
 }
 
@@ -374,7 +390,7 @@ void getCardSpecs() {
     cudaDeviceProp props;
     cudaGetDeviceProperties(&props, 0);
 
-    long long geneListSize = DISTANCES_PER_GENE * 18 * geneCount * sizeof(double);
+    long long geneListSize = DISTANCES_PER_GENE * REPLICATES_PER_GENE * geneCount * sizeof(double);
     long long resultsSize = geneCount * geneCount * sizeof(double);
 
     if(props.totalGlobalMem == 0) {
@@ -417,7 +433,7 @@ void sortAndPrint(double* geneList, double* distance, DistanceTuple** distanceMa
             row = i - 1;
             col = 0;
 
-            //Load entires from the diagonal 
+            //Load entries from the diagonal
             while(row >= 0 && col <= i - 1) {
                 tempDistanceList[distanceIndex] = distanceMatrix[row][col];
                 distanceIndex++;
@@ -451,7 +467,7 @@ void sortAndPrint(double* geneList, double* distance, DistanceTuple** distanceMa
         FILE * outfile = fopen(fname, "w");
 
         if(!outfile) {
-            printf("Warning: File could not be created. Exiting Program.\n");
+            printf("Warning: Output folder does not exist. Please create the output folder before running the program.\n");
             exit(1);
         }
 
@@ -569,14 +585,14 @@ int compareDistanceTuple (const void * a, const void * b) {
 }
 
 void usage(void) {
-    printf("Please enter the path of the input file as your first command line argument.\n");
-    printf("Valid additional arguments include:\n\n");
-    printf("\t-h, --help: displays this usage message\n\n");
-    printf("\t-r, --results: specify the number of results to save for each gene\n\n");
+    printf("User MUST provide an input file path\n\n");
     printf("\t-g, --gene: specify a specific gene to generate results for\n\n");
-    printf("\t-t, --thresholdPPIB: any genes with a PPIB lower than the number specified here will not be included in the calculations\n\n");
+    printf("\t-h, --help: displays this usage message\n\n");
+    printf("\t-i, --input: specify the input file path\n\n");
+    printf("\t-o, --output: specify which folder the output results will be saved in - must already exist\n\n");
     printf("\t-p, --plates: specify which specific plates will be included in the calculations. Format is: plate,plate,plate e.g. '-p 1,5,6' will calculate for only plates 1, 5, and 6.\n\n");
-    printf("\t-o, --output: specify which folder the output results will be saved in\n\n");
+    printf("\t-r, --results: specify the number of results to save for each gene\n\n");
+    printf("\t-t, --thresholdPPIB: any genes with a PPIB lower than the number specified here will not be included in the calculations\n\n");
 }
 
 unsigned char isSelectedPlate(int plateNumber) {
