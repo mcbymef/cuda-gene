@@ -292,21 +292,13 @@ int main(int argc, char** argv) {
 
         int numIterations = 1;
  
-        if(geneCount < TWO_KERNEL_THRESHOLD) {
-            gridSize = (geneCount % 32 == 0) ? geneCount/32 : geneCount/32 + 1;
-            cudaMalloc((void**) &distance_d, resultsSize);
-        } else {
+        if(geneCount >= TWO_KERNEL_THRESHOLD) {
+           numIterations = 2;
            //For a full input of 33,000, need to have 2 kernal calls
            //This means grids are half size as well as results on the device
-
-           //Ceiling of geneCount/2
-           int tmpCount = 1 + ((geneCount - 1) / 2);
-
-           //GridSize is half of total size needed
-           gridSize = ((tmpCount % 32) == 0) ? geneCount/64 : geneCount/64 + 1; 
-           cudaMalloc((void**) &distance_d, (resultsSize/2) + 1);
-
-           numIterations = 2;
+            cudaMalloc((void**) &distance_d, (resultsSize/2) + 1);
+        } else {
+            cudaMalloc((void**) &distance_d, resultsSize);
         }
 
         //Allocate space on the host for the distance results
@@ -323,11 +315,25 @@ int main(int argc, char** argv) {
 
         for(int i = 0; i < numIterations; i++) {
 
+            if(geneCount < TWO_KERNEL_THRESHOLD) {
+                gridSize = (geneCount % 32 == 0) ? geneCount/32 : geneCount/32 + 1;
+            } else {
+               //Ceiling of geneCount/2
+               int tmpCount = 1 + ((geneCount - 1) / 2);
+
+               //GridSize is half of total size needed
+               gridSize = ((tmpCount % 32) == 0) ? geneCount/64 : geneCount/64 + i;
+
+            }
+
             //Only ever going to have 2 kernel calls, need to make sure the whole gene list is covered
             //Genecount will be either even or odd
         	//even case: both kernel calls get half gene list
             //odd case: first kernel call gets genecount/2, 2nd one get genecount/2 + 1
-            calculateDistanceGPU<<<gridSize,blockSize>>>(distance_d, geneCount + (i * (geneCount % 2)), i);
+
+        	int newCount = geneCount/2 + (i * (geneCount % 2));
+
+            calculateDistanceGPU<<<gridSize,blockSize>>>(distance_d, newCount, i);
 
             cudaError_t error = cudaGetLastError();
 
@@ -336,14 +342,17 @@ int main(int argc, char** argv) {
     	        exit(1);
             }
 
+            if(geneCount < TWO_KERNEL_THRESHOLD) {
             //Get results back from the kernel
             cudaMemcpy(distance_h + (i * geneCount * geneCount / 2), distance_d, resultsSize, cudaMemcpyDeviceToHost);
+            } else {
+                cudaMemcpy(distance_h + (i * geneCount * geneCount / 2), distance_d, resultsSize/2, cudaMemcpyDeviceToHost);
+            }
         }
 
         cudaUnbindTexture(geneTex);
         cudaFree(geneList_d);
         cudaFree(distance_d);
-
         cudaDeviceReset();
 
     } else if(!singleGeneCalculation && !canUseCuda) {
