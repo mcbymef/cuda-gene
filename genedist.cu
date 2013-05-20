@@ -2,9 +2,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
-#include <cuda.h>
+#include "cuda.h"
 #include <ctype.h>
 #include "genedist.h"
+#include "cuda_runtime.h"
 
 char** nameList;
 
@@ -20,7 +21,7 @@ unsigned char canUseCuda;
 int numberOfResults = 10;
 
 //User specified gene, set by command line argument (optional)
-char selectedGene[MAX_NAME_SIZE] = "default";
+char selectedGene[MAX_GENE_NAME_SIZE] = "default";
 
 //User specified plates, set by command line argument (optional)
 int* selectedPlates = NULL;
@@ -34,11 +35,11 @@ int lowPPIB = -1;
 
 //User specified output file save location
 //DEFAULT: "output/"
-char outputLocation[200] = "output/";
+char outputLocation[MAX_FILE_PATH_SIZE] = "output";
 
 //User specified input file location
-char inputLocation[200] = "none";
-	  
+char inputLocation[MAX_FILE_PATH_SIZE] = "none";
+
 //Texture memory will be used to store gene information
 texture<int2, 1, cudaReadModeElementType> geneTex;
 
@@ -57,16 +58,16 @@ __global__ void calculateDistanceGPU(double* distance_d, int geneCount, calculat
     //Fill own gene (these memory accesses are not very much fun but can't be avoided if we use texture memory)
     double curr_gene[DISTANCES_PER_GENE];
 
-    double avgReplicateOne[6];
+	double avgReplicateOne[6];
 
     if(geneIndex < geneCount) {
 
         for(int i = 0; i < DISTANCES_PER_GENE; i++) {
-        	int2 v = tex1Dfetch(geneTex, (geneIndex * DISTANCES_PER_GENE) + i);
+        	int2 v = tex1Dfetch(geneTex, geneIndex * DISTANCES_PER_GENE + i);
         	curr_gene[i] = __hiloint2double(v.y, v.x);
         }
 
-        if(calcVariant == AVERAGE_FIRST_REPLICATE) {
+		if(calcVariant == AVERAGE_FIRST_DISTANCE) {
     		avgReplicateOne[0] = ((curr_gene[0] + curr_gene[6] + curr_gene[12])/3);
     		avgReplicateOne[1] = ((curr_gene[1] + curr_gene[7] + curr_gene[13])/3);
     		avgReplicateOne[2] = ((curr_gene[2] + curr_gene[8] + curr_gene[14])/3);
@@ -82,13 +83,9 @@ __global__ void calculateDistanceGPU(double* distance_d, int geneCount, calculat
             //Fill the shared input array collaboratively 
         	for(int j = 0; j < DISTANCES_PER_GENE; j++) {
 
-        	//Make sure the gene being loaded is in bounds (the number of genes will likely not be divisible by 32, so the last block
-                //will not have 32 valid array indices to access
-        	    if(geneIndex < geneCount) {
-        	        int2 v = tex1Dfetch(geneTex, (i * 32 * DISTANCES_PER_GENE) + (threadIdx.x * DISTANCES_PER_GENE) + j);
-        	        s_genes[threadIdx.x * DISTANCES_PER_GENE + j] =  __hiloint2double(v.y, v.x);
-                    }
-                }
+        	    int2 v = tex1Dfetch(geneTex, (i * 32 * DISTANCES_PER_GENE) + (threadIdx.x * DISTANCES_PER_GENE) + j);
+        	    s_genes[threadIdx.x * DISTANCES_PER_GENE + j] =  __hiloint2double(v.y, v.x);
+            }
 
             for(int j = 0; j < 32; j++) {
 
@@ -106,7 +103,9 @@ __global__ void calculateDistanceGPU(double* distance_d, int geneCount, calculat
 								 pow(s_genes[14 + offset] - curr_gene[14],2) + pow(s_genes[15 + offset] - curr_gene[15],2) +
 								 pow(s_genes[16 + offset] - curr_gene[16],2) + pow(s_genes[17 + offset] - curr_gene[17],2));
 
-            	} else if (calcVariant == AVERAGE_FIRST_REPLICATE) {
+            	} 
+				
+				else if (calcVariant == AVERAGE_FIRST_DISTANCE) {
 
                 	dist	=    __dsqrt_rz(pow(s_genes[0 + offset] - avgReplicateOne[0],2) + pow(s_genes[1 + offset] - avgReplicateOne[1],2) +
                 			     pow(s_genes[2 + offset] - avgReplicateOne[2],2) + pow(s_genes[3 + offset] - avgReplicateOne[3],2) +
@@ -117,8 +116,7 @@ __global__ void calculateDistanceGPU(double* distance_d, int geneCount, calculat
                                  __dsqrt_rz(pow(s_genes[12 + offset] - avgReplicateOne[0],2) + pow(s_genes[13 + offset] - curr_gene[1],2) +
                                  pow(s_genes[14 + offset] - avgReplicateOne[2],2) + pow(s_genes[15 + offset] - avgReplicateOne[3],2) +
                                  pow(s_genes[16 + offset] - avgReplicateOne[4],2) + pow(s_genes[17 + offset] - avgReplicateOne[5],2));
-
-            	}
+				}
 
                 results[(threadIdx.x * 32) + j] = dist;
             }
@@ -127,10 +125,10 @@ __global__ void calculateDistanceGPU(double* distance_d, int geneCount, calculat
 
             	int sharedoffset = j* 32;
 
-                int globalOffset = ((blockIdx.x * 32 * geneCount)  + (j * geneCount) + (32 * i));
+                int globaloffset = (blockIdx.x * 32 * geneCount) + (j * geneCount) + (32 * i);
 
-                if(threadIdx.x + globalOffset < geneCount * (geneCount/2)) {
-            	    distance_d[threadIdx.x + globalOffset ] = results[threadIdx.x + sharedoffset];
+                if(threadIdx.x + globaloffset < geneCount * geneCount) {
+            	    distance_d[threadIdx.x + globaloffset ] = results[threadIdx.x + sharedoffset];
                 }
             }
         }
@@ -154,7 +152,7 @@ void parseArguments(int argc, char** argv) {
         	} else if (strcmp(argv[i], "-c") == 0 || strcmp(argv[i], "--calc") == 0) {
 
         		//Convert string to upper case
-        		char str[200] = "temp";
+        		char str[MAX_FILE_PATH_SIZE] = "temp";
         		strcpy(str, argv[i+1]);
         		int i = 0;
 
@@ -166,8 +164,8 @@ void parseArguments(int argc, char** argv) {
 
         		if(strcmp(str, "STANDARD") == 0) {
         			calcVariant = STANDARD;
-        		} else if (strcmp(str, "AVERAGE_FIRST_REPLICATE") == 0) {
-        			calcVariant = AVERAGE_FIRST_REPLICATE;
+        		} else if (strcmp(str, "AVERAGE_FIRST_DISTANCE") == 0) {
+        			calcVariant = AVERAGE_FIRST_DISTANCE;
         		} else {
         			printf("Warning: No such calculation variant as %s. Please see usage below for a list of acceptable variants.\n", str);
         			usage();
@@ -236,10 +234,16 @@ void parseArguments(int argc, char** argv) {
 
             	strcpy(outputLocation, argv[i+1]);
 
-            	if(outputLocation[strlen(outputLocation) - 1] != '/') {
-            		outputLocation[strlen(outputLocation)] = '/';
-            	}
-
+				/*********************************************************
+				*
+				* Not sure if this is necessary, simply adds a trailing '/'
+				* Maybe different for windows vs. posix machines as well
+				*
+				**********************************************************/
+            	//if(outputLocation[strlen(outputLocation) - 1] != '/') {
+            	//	outputLocation[strlen(outputLocation)] = '/';
+            	//}
+				
             } else {
                 printf("Warning: %s is an invalid command line argument\n. See below for usage.\n\n", argv[i]);
                 usage();
@@ -258,8 +262,10 @@ int main(int argc, char** argv) {
     double* geneList_h, *geneList_d;
     double*  distance_d, *distance_h;
 
-    //Only initialized if calculating all results and GPU is unavailable
-    DistanceTuple** distanceMatrix;
+    //Only holds data if calculating all results and GPU is unavailable
+    DistanceTuple** distanceMatrix = NULL;
+
+	distance_h = NULL;
 
     parseArguments(argc, argv);
     
@@ -284,7 +290,7 @@ int main(int argc, char** argv) {
     nameList = (char **) malloc(MAX_GENES * sizeof(char*));
 
     for(int i = 0; i < MAX_GENES; i++) {
-        nameList[i] = (char *) malloc(MAX_NAME_SIZE * sizeof(char));
+        nameList[i] = (char *) malloc(MAX_GENE_NAME_SIZE * sizeof(char));
     }
 
     //File exists so continue
@@ -294,11 +300,6 @@ int main(int argc, char** argv) {
     fclose(inputFile);
 
     printf("Read file successfully.\n");
-
-    if(geneCount == 0) {
-    	printf("No genes found that meet specified criteria. Please provide new criteria to expand number of eligible genes ord verify that the specified input file is correctly formatted.\n");
-    	exit(0);
-    }
 
     if(geneCount == 1) {
         printf("Only one gene found that meets specified criteria. Please provide new criteria to expand number of eligible genes.\n");
@@ -310,7 +311,7 @@ int main(int argc, char** argv) {
     }
 
     if(numberOfResults > geneCount - 1) {
-        printf("Error: number of results requested exceeds maximum allowable number.\n");
+        printf("Error: number of results requested  exceeds maximum allowable number.\n");
         printf("Number of genes: %d, maximum number of results per gene: %d\n", geneCount, geneCount-1);
         printf("Number of results will be set to maximum. All results will be saved.\n");
         numberOfResults = geneCount - 1;
@@ -322,8 +323,7 @@ int main(int argc, char** argv) {
 
     if(!singleGeneCalculation) {
         //Get memory specifications of the GPU
-        //getCardSpecs();
-        canUseCuda = 1;
+        getCardSpecs();
     }
 
     if(geneCount < CUDA_CUTOFF) {
@@ -339,38 +339,47 @@ int main(int argc, char** argv) {
 
     if(!singleGeneCalculation && canUseCuda) {
 
+		cudaError_t error;
+
         //There will be n^2 results from n genes
         long long resultsSize = geneCount * geneCount * sizeof(double);
 
         dim3 blockSize = 32;
         dim3 gridSize = 0;     
-
-        cudaMalloc((void**) &distance_d, resultsSize);
+ 
+        gridSize = (geneCount % 32 == 0) ? geneCount/32 : geneCount/32 + 1;
+        
+		error = cudaMalloc((void**) &distance_d, resultsSize);
+		checkCudaError(error, "Malloc for device side distance array");
 
         //Allocate space on the host for the distance results
         distance_h = (double*) malloc(resultsSize);
 
-        //Allocate memory on the device for the gene list and distance results
-        cudaMalloc((void**) &geneList_d, geneListSize);
+        //Allocate memory on the device for the genelist
+        error = cudaMalloc((void**) &geneList_d, geneListSize);
+		checkCudaError(error, "Malloc for device side gene list array");
 
         //Copy the gene list to the device
-        cudaMemcpy(geneList_d, geneList_h, geneListSize, cudaMemcpyHostToDevice);
+        error = cudaMemcpy(geneList_d, geneList_h, geneListSize, cudaMemcpyHostToDevice);
+		checkCudaError(error, "Copy genelist from host to device");
 
         //Bind geneList to texture memory
-        cudaBindTexture(NULL, geneTex, geneList_d, geneListSize);
+        error = cudaBindTexture(NULL, geneTex, geneList_d, geneListSize);
+		checkCudaError(error, "Bind genelist to texture memory");
 
-		gridSize = (geneCount % 32 == 0) ? geneCount/32 : geneCount/32 + 1;
+        calculateDistanceGPU<<<gridSize,blockSize>>>(distance_d, geneCount, calcVariant);
 
-		calculateDistanceGPU<<<gridSize,blockSize>>>(distance_d, geneCount, calcVariant);
+		error = cudaGetLastError();
+        
+		//If there is an error in the kernel, exit the program because results will be invalid
+		if(error) {
+			printf("Progrm experienced error in kernel call and will now exit.\n");
+    	    exit(1);
+        }
 
-		cudaError_t error = cudaGetLastError();
-
-		if(error != cudaSuccess) {
-			printf("CUDA error: %s\n", cudaGetErrorString(error));
-			exit(1);
-		}
-
-		cudaMemcpy(distance_h, distance_d, resultsSize, cudaMemcpyDeviceToHost);
+        //Get results back from the kernel
+        error = cudaMemcpy(distance_h, distance_d, resultsSize, cudaMemcpyDeviceToHost);
+		checkCudaError(error, "Copy results from Device to Host");
 
         error = cudaUnbindTexture(geneTex);
         checkCudaError(error, "Unbind Texture");
@@ -383,7 +392,6 @@ int main(int argc, char** argv) {
 
         error = cudaDeviceReset();
         checkCudaError(error, "Device Reset");
-
 
     } else if(!singleGeneCalculation && !canUseCuda) {
 
@@ -411,7 +419,6 @@ int main(int argc, char** argv) {
 
     free(geneList_h);
 
-    //distance_h is only initialized when using CUDA
     if((!singleGeneCalculation && canUseCuda) || singleGeneCalculation) {
         free(distance_h);
     }
@@ -428,13 +435,17 @@ int main(int argc, char** argv) {
     return 0;
 }
 
-void checkCudaError(cudaError_t error, char* operation) {
+bool checkCudaError(cudaError_t error, char* operation) {
 
 	if(strcmp(cudaGetErrorString(error), "no error") != 0) {
 
 		printf("Warning: the following CUDA error occurred: %s\n", cudaGetErrorString(error));
 		printf("This error occurred during the following operation: %s\n\n", operation);
+
+		return 1;
 	}
+
+	return 0;
 }
 
 void getCardSpecs() {
@@ -512,19 +523,12 @@ void sortAndPrint(double* geneList, double* distance, DistanceTuple** distanceMa
             }
         }
 
-        //Both the CUDA version and multigene serial version compare gene to itself
-        //For standard calculation variant, this results in a value of 0
-        //However, for average_first_replicant variant, the result is nonzero but is not useful
-        //Thus, for standard this value should already be zero but for AFR variant needs to be set to zero
-        if( (!singleGeneCalculation && canUseCuda)|| singleGeneCalculation) {
-        	tempDistanceList[i].distance = 0.0;
-        }
-
         int listSize = ( (!singleGeneCalculation && canUseCuda)|| singleGeneCalculation) ? geneCount : geneCount - 1;
 
         qsort (tempDistanceList, listSize, sizeof(DistanceTuple), compareDistanceTuple);
 
-        char fname[40];
+        char fname[MAX_FILE_PATH_SIZE + MAX_GENE_NAME_SIZE];
+
         strcpy(fname, outputLocation);
         if(singleGeneCalculation) {
             strcat(fname, selectedGene);
@@ -576,9 +580,9 @@ void calculateSingleDistance(char* gene, double* geneList, double* distanceList)
 
     int currOffset = currGeneIndex * DISTANCES_PER_GENE;
 
-    double avgReplicateOne[6];
+	double avgReplicateOne[6];
 
-	if(calcVariant == AVERAGE_FIRST_REPLICATE) {
+	if(calcVariant == AVERAGE_FIRST_DISTANCE) {
 		avgReplicateOne[0] = ((geneList[0 + currOffset] + geneList[6 + currOffset] + geneList[12 + currOffset])/3);
 		avgReplicateOne[1] = ((geneList[1 + currOffset] + geneList[7 + currOffset] + geneList[13 + currOffset])/3);
 		avgReplicateOne[2] = ((geneList[2 + currOffset] + geneList[8 + currOffset] + geneList[14 + currOffset])/3);
@@ -591,13 +595,29 @@ void calculateSingleDistance(char* gene, double* geneList, double* distanceList)
 
         int tmpOffset = i * DISTANCES_PER_GENE;
 
-        if(calcVariant == STANDARD) {
+		if(calcVariant == STANDARD) {
 
-        	dist = calculateStandardVariant(geneList, currOffset, tmpOffset);
+			dist = sqrt(pow(geneList[0 + tmpOffset] - geneList[0 + currOffset],2) + pow(geneList[1 + tmpOffset] - geneList[1 + currOffset],2) +
+						pow(geneList[2 + tmpOffset] - geneList[2 + currOffset],2) + pow(geneList[3 + tmpOffset] - geneList[3 + currOffset],2) +
+						pow(geneList[4 + tmpOffset] - geneList[4 + currOffset],2) + pow(geneList[5 + tmpOffset] - geneList[5 + currOffset],2))
+				 + sqrt(pow(geneList[6 + tmpOffset] - geneList[6 + currOffset],2) + pow(geneList[7 + tmpOffset] - geneList[7 + currOffset],2) +
+						pow(geneList[8 + tmpOffset] - geneList[8 + currOffset],2) + pow(geneList[9 + tmpOffset] - geneList[9 + currOffset],2) +
+						pow(geneList[10 + tmpOffset] - geneList[10 + currOffset],2) + pow(geneList[11 + tmpOffset] - geneList[11 + currOffset],2))
+				 + sqrt(pow(geneList[12 + tmpOffset] - geneList[12 + currOffset],2) + pow(geneList[13 + tmpOffset] - geneList[13 + currOffset],2) +
+						pow(geneList[14 + tmpOffset] - geneList[14 + currOffset],2) + pow(geneList[15 + tmpOffset] - geneList[15 + currOffset],2) +
+						pow(geneList[16 + tmpOffset] - geneList[16 + currOffset],2) + pow(geneList[17 + tmpOffset] - geneList[17 + currOffset],2));
 
-        } else if(calcVariant == AVERAGE_FIRST_REPLICATE) {
+        } else if(calcVariant == AVERAGE_FIRST_DISTANCE) {
 
-            dist = calculateAverageFirstReplicateVariant(geneList, tmpOffset, avgReplicateOne);
+			dist = sqrt(pow(geneList[0 + tmpOffset] - avgReplicateOne[0],2) + pow(geneList[1 + tmpOffset] - avgReplicateOne[1],2) +
+						pow(geneList[2 + tmpOffset] - avgReplicateOne[2],2) + pow(geneList[3 + tmpOffset] - avgReplicateOne[3],2) +
+						pow(geneList[4 + tmpOffset] - avgReplicateOne[4],2) + pow(geneList[5 + tmpOffset] - avgReplicateOne[5],2))
+				 + sqrt(pow(geneList[6 + tmpOffset] - avgReplicateOne[0],2) + pow(geneList[7 + tmpOffset] - avgReplicateOne[1],2) +
+						pow(geneList[8 + tmpOffset] - avgReplicateOne[2],2) + pow(geneList[9 + tmpOffset] - avgReplicateOne[3],2) +
+						pow(geneList[10 + tmpOffset] - avgReplicateOne[4],2) + pow(geneList[11 + tmpOffset] - avgReplicateOne[5],2))
+				 + sqrt(pow(geneList[12 + tmpOffset] - avgReplicateOne[0],2) + pow(geneList[13 + tmpOffset] - avgReplicateOne[1],2) +
+						pow(geneList[14 + tmpOffset] - avgReplicateOne[2],2) + pow(geneList[15 + tmpOffset] - avgReplicateOne[3],2) +
+						pow(geneList[16 + tmpOffset] - avgReplicateOne[4],2) + pow(geneList[17 + tmpOffset] - avgReplicateOne[5],2));
         }
 
         distanceList[i] = dist;
@@ -623,10 +643,10 @@ void calculateDistanceCPU(double* geneList, DistanceTuple** distanceMatrix) {
         currGeneIndex = i;
     
         currOffset = currGeneIndex * DISTANCES_PER_GENE;
-        
-        double avgReplicateOne[6];
 
-    	if(calcVariant == AVERAGE_FIRST_REPLICATE) {
+		double avgReplicateOne[6];
+
+    	if(calcVariant == AVERAGE_FIRST_DISTANCE) {
     		avgReplicateOne[0] = ((geneList[0 + currOffset] + geneList[6 + currOffset] + geneList[12 + currOffset])/3);
     		avgReplicateOne[1] = ((geneList[1 + currOffset] + geneList[7 + currOffset] + geneList[13 + currOffset])/3);
     		avgReplicateOne[2] = ((geneList[2 + currOffset] + geneList[8 + currOffset] + geneList[14 + currOffset])/3);
@@ -634,20 +654,37 @@ void calculateDistanceCPU(double* geneList, DistanceTuple** distanceMatrix) {
     		avgReplicateOne[4] = ((geneList[4 + currOffset] + geneList[10 + currOffset] + geneList[16 + currOffset])/3);
     		avgReplicateOne[5] = ((geneList[5 + currOffset] + geneList[11 + currOffset] + geneList[17 + currOffset])/3);
     	}
-
+        
         distColIndex = 0;
     
         for(int j = i+1; j < geneCount; j++) {
     
             tmpOffset = j * DISTANCES_PER_GENE;
-            
-            if(calcVariant == STANDARD) {
 
-            	dist = calculateStandardVariant(geneList, currOffset, tmpOffset);
-            } else if (calcVariant == AVERAGE_FIRST_REPLICATE) {
+			if(calcVariant == STANDARD) {
 
-            	dist = calculateAverageFirstReplicateVariant(geneList, tmpOffset, avgReplicateOne);
+            	 dist = sqrt(pow(geneList[0 + tmpOffset] - geneList[0 + currOffset],2) + pow(geneList[1 + tmpOffset] - geneList[1 + currOffset],2) +
+							pow(geneList[2 + tmpOffset] - geneList[2 + currOffset],2) + pow(geneList[3 + tmpOffset] - geneList[3 + currOffset],2) +
+							pow(geneList[4 + tmpOffset] - geneList[4 + currOffset],2) + pow(geneList[5 + tmpOffset] - geneList[5 + currOffset],2))
+					 + sqrt(pow(geneList[6 + tmpOffset] - geneList[6 + currOffset],2) + pow(geneList[7 + tmpOffset] - geneList[7 + currOffset],2) +
+							pow(geneList[8 + tmpOffset] - geneList[8 + currOffset],2) + pow(geneList[9 + tmpOffset] - geneList[9 + currOffset],2) +
+							pow(geneList[10 + tmpOffset] - geneList[10 + currOffset],2) + pow(geneList[11 + tmpOffset] - geneList[11 + currOffset],2))
+					 + sqrt(pow(geneList[12 + tmpOffset] - geneList[12 + currOffset],2) + pow(geneList[13 + tmpOffset] - geneList[13 + currOffset],2) +
+							pow(geneList[14 + tmpOffset] - geneList[14 + currOffset],2) + pow(geneList[15 + tmpOffset] - geneList[15 + currOffset],2) +
+							pow(geneList[16 + tmpOffset] - geneList[16 + currOffset],2) + pow(geneList[17 + tmpOffset] - geneList[17 + currOffset],2));
+            } else if (calcVariant == AVERAGE_FIRST_DISTANCE) {
+
+				dist = sqrt(pow(geneList[0 + tmpOffset] - avgReplicateOne[0],2) + pow(geneList[1 + tmpOffset] - avgReplicateOne[1],2) +
+							pow(geneList[2 + tmpOffset] - avgReplicateOne[2],2) + pow(geneList[3 + tmpOffset] - avgReplicateOne[3],2) +
+							pow(geneList[4 + tmpOffset] - avgReplicateOne[4],2) + pow(geneList[5 + tmpOffset] - avgReplicateOne[5],2))
+					 + sqrt(pow(geneList[6 + tmpOffset] - avgReplicateOne[0],2) + pow(geneList[7 + tmpOffset] - avgReplicateOne[1],2) +
+							pow(geneList[8 + tmpOffset] - avgReplicateOne[2],2) + pow(geneList[9 + tmpOffset] - avgReplicateOne[3],2) +
+							pow(geneList[10 + tmpOffset] - avgReplicateOne[4],2) + pow(geneList[11 + tmpOffset] - avgReplicateOne[5],2))
+					 + sqrt(pow(geneList[12 + tmpOffset] - avgReplicateOne[0],2) + pow(geneList[13 + tmpOffset] - avgReplicateOne[1],2) +
+							pow(geneList[14 + tmpOffset] - avgReplicateOne[2],2) + pow(geneList[15 + tmpOffset] - avgReplicateOne[3],2) +
+							pow(geneList[16 + tmpOffset] - avgReplicateOne[4],2) + pow(geneList[17 + tmpOffset] - avgReplicateOne[5],2));
             }
+                        
              
             distanceMatrix[i][distColIndex].geneOne = i;
             distanceMatrix[i][distColIndex].geneTwo = j;
@@ -656,44 +693,6 @@ void calculateDistanceCPU(double* geneList, DistanceTuple** distanceMatrix) {
             distColIndex++;
         }
     }
-}
-
-double calculateAverageFirstReplicateVariant(double* geneList, int tmpGeneOffset, double* avgReplicateOne) {
-
-	int tmpOffset = tmpGeneOffset;
-    double dist = 0.0;
-
-	dist = sqrt(pow(geneList[0 + tmpOffset] - avgReplicateOne[0],2) + pow(geneList[1 + tmpOffset] - avgReplicateOne[1],2) +
-                pow(geneList[2 + tmpOffset] - avgReplicateOne[2],2) + pow(geneList[3 + tmpOffset] - avgReplicateOne[3],2) +
-                pow(geneList[4 + tmpOffset] - avgReplicateOne[4],2) + pow(geneList[5 + tmpOffset] - avgReplicateOne[5],2))
-         + sqrt(pow(geneList[6 + tmpOffset] - avgReplicateOne[0],2) + pow(geneList[7 + tmpOffset] - avgReplicateOne[1],2) +
-                pow(geneList[8 + tmpOffset] - avgReplicateOne[2],2) + pow(geneList[9 + tmpOffset] - avgReplicateOne[3],2) +
-                pow(geneList[10 + tmpOffset] - avgReplicateOne[4],2) + pow(geneList[11 + tmpOffset] - avgReplicateOne[5],2))
-         + sqrt(pow(geneList[12 + tmpOffset] - avgReplicateOne[0],2) + pow(geneList[13 + tmpOffset] - avgReplicateOne[1],2) +
-                pow(geneList[14 + tmpOffset] - avgReplicateOne[2],2) + pow(geneList[15 + tmpOffset] - avgReplicateOne[3],2) +
-                pow(geneList[16 + tmpOffset] - avgReplicateOne[4],2) + pow(geneList[17 + tmpOffset] - avgReplicateOne[5],2));
-
-	return dist;
-}
-
-double calculateStandardVariant(double* geneList, int currGeneOffset, int tmpGeneOffset) {
-
-	int currOffset = currGeneOffset;
-	int tmpOffset = tmpGeneOffset;
-	double dist = 0.0;
-
-	dist = sqrt(pow(geneList[0 + tmpOffset] - geneList[0 + currOffset],2) + pow(geneList[1 + tmpOffset] - geneList[1 + currOffset],2) +
-				pow(geneList[2 + tmpOffset] - geneList[2 + currOffset],2) + pow(geneList[3 + tmpOffset] - geneList[3 + currOffset],2) +
-				pow(geneList[4 + tmpOffset] - geneList[4 + currOffset],2) + pow(geneList[5 + tmpOffset] - geneList[5 + currOffset],2))
-		 + sqrt(pow(geneList[6 + tmpOffset] - geneList[6 + currOffset],2) + pow(geneList[7 + tmpOffset] - geneList[7 + currOffset],2) +
-				pow(geneList[8 + tmpOffset] - geneList[8 + currOffset],2) + pow(geneList[9 + tmpOffset] - geneList[9 + currOffset],2) +
-				pow(geneList[10 + tmpOffset] - geneList[10 + currOffset],2) + pow(geneList[11 + tmpOffset] - geneList[11 + currOffset],2))
-		 + sqrt(pow(geneList[12 + tmpOffset] - geneList[12 + currOffset],2) + pow(geneList[13 + tmpOffset] - geneList[13 + currOffset],2) +
-				pow(geneList[14 + tmpOffset] - geneList[14 + currOffset],2) + pow(geneList[15 + tmpOffset] - geneList[15 + currOffset],2) +
-				pow(geneList[16 + tmpOffset] - geneList[16 + currOffset],2) + pow(geneList[17 + tmpOffset] - geneList[17 + currOffset],2));
-
-	return dist;
-
 }
 
 int compareDistanceTuple (const void * a, const void * b) {
@@ -716,7 +715,7 @@ void usage(void) {
     printf("User MUST provide an input file path\n\n");
     printf("\t-c, --calc: specify the calculation variant to be run. Valid options are as follows:\n");
     printf("\t\tSTANDARD - dist(r1,s1) + dist(r2,s2) + dist(r3,s3)\n");
-    printf("\t\tAVERAGE_FIRST_REPLICATE - dist(avg(r1,r2,r3), s1) + dist(avg(r1,r2,r3), s2) + dist(avg(r1,r2,r3), s3)\n\n");
+    printf("\t\tAVERAGE_FIRST_DISTANCE - dist(avg(r1,r2,r3), s1) + dist(avg(r1,r2,r3), s2) + dist(avg(r1,r2,r3), s3)\n\n");
     printf("\t-g, --gene: specify a specific gene to generate results for\n\n");
     printf("\t-h, --help: displays this usage message\n\n");
     printf("\t-i, --input: specify the input file path\n\n");
